@@ -5,9 +5,14 @@ use ansi_term::{Style,Colour};
 
 const MAX_COLOURS : u16 = 256;
 
+const OPTION_FILTER : &str = "";
+const OPTION_HIGHLIGHT : &str = "h:";
+const OPTION_NEGATIVE_FILTER : &str = "n:";
+
+#[derive(Debug)]
 pub enum Command {
     // Discards the line if no substring matches Filter, otherwise highlights the matched text
-    Filter(Regex, Style),
+    Filter(Regex, Style, /* negative */ bool),
     // Highlights the matched text (if present). Doesn't discard the current line.
     // NOT IMPLEMENTED
     Highlight(Regex, Style),
@@ -16,8 +21,9 @@ pub enum Command {
 // Holds the context to process each line. Context would be a list of words to
 // match (with colors), thinks to memorize, or other kind of commands to be
 // done on lines. It should be like a list of commands to apply to lines.
+#[derive(Debug)]
 pub struct Context {
-    pub commands : Vec<Command>,
+    pub commands : VecDeque<Command>,
 }
 
 impl Context {
@@ -40,37 +46,48 @@ impl Context {
             }
         }
 
-        let mut commands: Vec<Command> = Vec::new();
+        let mut commands: VecDeque<Command> = VecDeque::new();
 
-        for command_arg in command_args {
-            let regex = RegexBuilder::new(&command_arg).case_insensitive(true).build();
-            if regex.is_err() {
-                match regex.err().unwrap() {
-                    regex::Error::Syntax(e) => return Err(anyhow::anyhow!(format!("Error {} parsing regex '{}'", e, command_arg))),
-                    regex::Error::CompiledTooBig(s) => return Err(anyhow::anyhow!(format!("Regex too big for {}, max size {}", command_arg, s))),
-                    _ => return Err(anyhow::anyhow!(format!("Unknown error for {}", command_arg))),
+        for mut command_arg in command_args {
+            if command_arg.starts_with(OPTION_HIGHLIGHT) {
+                command_arg = command_arg.drain(OPTION_HIGHLIGHT.len()..).collect();
+                let regex = RegexBuilder::new(&command_arg).case_insensitive(true).build();
+                if regex.is_err() {
+                    return Err(anyhow::anyhow!(format!("{:?}", regex.err().unwrap())));
                 }
+                commands.push_back(Command::Highlight(regex.unwrap(), styles.pop_front().unwrap()));
+            } else if command_arg.starts_with(OPTION_NEGATIVE_FILTER) {
+                command_arg = command_arg.drain(OPTION_NEGATIVE_FILTER.len()..).collect();
+                let regex = RegexBuilder::new(&command_arg).case_insensitive(true).build();
+                if regex.is_err() {
+                    return Err(anyhow::anyhow!(format!("{:?}", regex.err().unwrap())));
+                }
+                commands.push_back(Command::Filter(regex.unwrap(), styles.pop_front().unwrap(), true));
+            } else {
+                assert!(OPTION_FILTER == "");
+                let regex = RegexBuilder::new(&command_arg).case_insensitive(true).build();
+                if regex.is_err() {
+                    return Err(anyhow::anyhow!(format!("{:?}", regex.err().unwrap())));
+                }
+                commands.push_back(Command::Filter(regex.unwrap(), styles.pop_front().unwrap(), false));
             }
-
-            commands.push(Command::Filter(regex.unwrap(), styles.pop_front().unwrap()));
         }
 
         Ok(Context {commands})
     }
 
     pub fn empty() -> Self {
-        let commands: Vec<Command> = Vec::new();
+        let commands: VecDeque<Command> = VecDeque::new();
         Context { commands }
     }
 }
 
 fn process_line(line: &String, context: &Context) {
     let mut out_line: String = line.clone();
-    // TODO: Apply the filters in the context
     for command in &context.commands {
         match command {
-            Command::Filter(regex, style) => {
-                if !regex.is_match(line.as_bytes()) {
+            Command::Filter(regex, style, negative) => {
+                if !regex.is_match(line.as_bytes()) ^ negative {
                     return;
                 }
                 out_line = String::from_utf8(regex.replace_all(
@@ -78,7 +95,12 @@ fn process_line(line: &String, context: &Context) {
                     style.paint("$0").to_string().as_bytes()
                 ).to_vec()).expect("Wrong UTF-8 conversion");
             },
-            _ => {},
+            Command::Highlight(regex, style) => {
+                out_line = String::from_utf8(regex.replace_all(
+                    out_line.as_bytes(),
+                    style.paint("$0").to_string().as_bytes()
+                ).to_vec()).expect("Wrong UTF-8 conversion");
+            },
         }
     }
     print!("{}", out_line);
