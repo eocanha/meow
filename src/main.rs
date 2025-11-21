@@ -5,14 +5,18 @@ use ansi_term::{Style,Colour};
 
 const MAX_COLOURS : u16 = 256;
 
-const OPTION_FILTER : &str = "";
+// Example parameters: sourcebuffer h:true h:false 'h:[0-9]:[0-9:.]*[0-9]' n:enqueue
+
+const OPTION_FILTER : &str = "fc:";
+const OPTION_FILTER_NO_HIGHLIGHT : &str = "fn:";
 const OPTION_HIGHLIGHT : &str = "h:";
 const OPTION_NEGATIVE_FILTER : &str = "n:";
+// TODO: const OPTION_SUBSTITUTION : &str = "s:";
 
 #[derive(Debug)]
 pub enum Command {
     // Discards the line if no substring matches Filter, otherwise highlights the matched text
-    Filter(Regex, Style, /* negative */ bool),
+    Filter(Regex, Style, /* negative */ bool, /* highlight */ bool),
     // Highlights the matched text (if present). Doesn't discard the current line.
     // NOT IMPLEMENTED
     Highlight(Regex, Style),
@@ -49,7 +53,14 @@ impl Context {
         let mut commands: VecDeque<Command> = VecDeque::new();
 
         for mut command_arg in command_args {
-            if command_arg.starts_with(OPTION_HIGHLIGHT) {
+            if command_arg.starts_with(OPTION_FILTER_NO_HIGHLIGHT) {
+                command_arg = command_arg.drain(OPTION_FILTER_NO_HIGHLIGHT.len()..).collect();
+                let regex = RegexBuilder::new(&command_arg).case_insensitive(true).build();
+                if regex.is_err() {
+                    return Err(anyhow::anyhow!(format!("{:?}", regex.err().unwrap())));
+                }
+                commands.push_back(Command::Filter(regex.unwrap(), styles.pop_front().unwrap(), false, false));
+            } else if command_arg.starts_with(OPTION_HIGHLIGHT) {
                 command_arg = command_arg.drain(OPTION_HIGHLIGHT.len()..).collect();
                 let regex = RegexBuilder::new(&command_arg).case_insensitive(true).build();
                 if regex.is_err() {
@@ -62,14 +73,17 @@ impl Context {
                 if regex.is_err() {
                     return Err(anyhow::anyhow!(format!("{:?}", regex.err().unwrap())));
                 }
-                commands.push_back(Command::Filter(regex.unwrap(), styles.pop_front().unwrap(), true));
+                commands.push_back(Command::Filter(regex.unwrap(), styles.pop_front().unwrap(), true, false));
             } else {
-                assert!(OPTION_FILTER == "");
+                // Filters can be specified with "fc:" (that's why we remove the header) or just with "" (that's why we're in an else)
+                if command_arg.starts_with(OPTION_FILTER) {
+                    command_arg = command_arg.drain(OPTION_FILTER.len()..).collect();
+                }
                 let regex = RegexBuilder::new(&command_arg).case_insensitive(true).build();
                 if regex.is_err() {
                     return Err(anyhow::anyhow!(format!("{:?}", regex.err().unwrap())));
                 }
-                commands.push_back(Command::Filter(regex.unwrap(), styles.pop_front().unwrap(), false));
+                commands.push_back(Command::Filter(regex.unwrap(), styles.pop_front().unwrap(), false, true));
             }
         }
 
@@ -86,14 +100,16 @@ fn process_line(line: &String, context: &Context) {
     let mut out_line: String = line.clone();
     for command in &context.commands {
         match command {
-            Command::Filter(regex, style, negative) => {
+            Command::Filter(regex, style, negative, highlight) => {
                 if !regex.is_match(line.as_bytes()) ^ negative {
                     return;
                 }
-                out_line = String::from_utf8(regex.replace_all(
-                    out_line.as_bytes(),
-                    style.paint("$0").to_string().as_bytes()
-                ).to_vec()).expect("Wrong UTF-8 conversion");
+                if *highlight {
+                    out_line = String::from_utf8(regex.replace_all(
+                        out_line.as_bytes(),
+                        style.paint("$0").to_string().as_bytes()
+                    ).to_vec()).expect("Wrong UTF-8 conversion");
+                }
             },
             Command::Highlight(regex, style) => {
                 out_line = String::from_utf8(regex.replace_all(
