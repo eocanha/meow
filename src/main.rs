@@ -18,7 +18,6 @@ pub enum Command {
     // Discards the line if no substring matches Filter, otherwise highlights the matched text
     Filter(Regex, Style, /* negative */ bool, /* highlight */ bool),
     // Highlights the matched text (if present). Doesn't discard the current line.
-    // NOT IMPLEMENTED
     Highlight(Regex, Style),
 }
 
