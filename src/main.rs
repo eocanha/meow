@@ -97,11 +97,12 @@ impl Context {
 
 fn process_line(line: &String, context: &Context) {
     let mut out_line: String = line.clone();
+    let mut some_command_has_matched = false;
     for command in &context.commands {
         match command {
             Command::Filter(regex, style, negative, highlight) => {
                 if !regex.is_match(line.as_bytes()) ^ negative {
-                    return;
+                    continue;
                 }
                 if *highlight {
                     out_line = String::from_utf8(regex.replace_all(
@@ -109,16 +110,20 @@ fn process_line(line: &String, context: &Context) {
                         style.paint("$0").to_string().as_bytes()
                     ).to_vec()).expect("Wrong UTF-8 conversion");
                 }
+                some_command_has_matched = true;
             },
             Command::Highlight(regex, style) => {
                 out_line = String::from_utf8(regex.replace_all(
                     out_line.as_bytes(),
                     style.paint("$0").to_string().as_bytes()
                 ).to_vec()).expect("Wrong UTF-8 conversion");
+                some_command_has_matched = true;
             },
         }
     }
-    print!("{}", out_line);
+    if some_command_has_matched {
+        print!("{}", out_line);
+    }
 }
 
 fn process_all(stdin: std::io::Stdin, context: Context) {
