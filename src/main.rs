@@ -104,7 +104,12 @@ pub enum LineSelection {
 }
 
 fn process_line(line: &String, context: &Context) {
+    const DEBUG : bool = false;
+
     let mut out_line: String = line.clone();
+
+    if DEBUG { print!("--> {}", out_line); }
+
     let mut line_selection = LineSelection::Neutral;
     let mut commands_iter = context.commands.iter().peekable();
     while let Some(command) = commands_iter.next() {
@@ -125,6 +130,7 @@ fn process_line(line: &String, context: &Context) {
                                 Command::Filter(_, _, negative, _) => !negative,
                                 _ => false,
                             };
+                            if DEBUG { println!("     ,--> is_positive_filter({:?}): {:?}", next_command, result); }
                             return result;
                         }
                         // (Positive) filters that don't match leave the line as Neutral, so
@@ -153,10 +159,13 @@ fn process_line(line: &String, context: &Context) {
                 ).to_vec()).expect("Wrong UTF-8 conversion");
             },
         }
+        if DEBUG { println!("   --> {:?} --> {:?}", command, line_selection); }
     }
     if line_selection != LineSelection::ExplicitlyForbidden {
-        print!("{}", out_line);
+        if DEBUG { print!("Result: {}", out_line); }
+        else { print!("{}", out_line); }
     }
+    if DEBUG { println!("------"); }
 }
 
 fn process_all(stdin: std::io::Stdin, context: Context) {
