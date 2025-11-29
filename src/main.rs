@@ -24,7 +24,7 @@ pub enum Command {
 }
 
 // Holds the context to process each line. Context would be a list of words to
-// match (with colors), thinks to memorize, or other kind of commands to be
+// match (with colors), things to memorize, or other kind of commands to be
 // done on lines. It should be like a list of commands to apply to lines.
 #[derive(Debug)]
 pub struct Context {
@@ -81,7 +81,7 @@ impl Context {
                 command_arg = command_arg.drain(delimiter.len()..).collect();
                 let tokens : Vec<&str> = command_arg.split(&delimiter).collect();
                 if tokens.len() != 2 {
-                    return Err(anyhow::anyhow!("Substitution command \"s:\" requires two expressions. Examples: s:#pattern#replacement s:/pattern/replacement"));
+                    return Err(anyhow::anyhow!("Substitution command \"s:\" requires two expressions. Examples: s:#pattern#replacement 's:/(?<adjective>big|small)/${{adjective}}ish'"));
                 }
                 let regex = RegexBuilder::new(&tokens[0]).case_insensitive(true).build();
                 if regex.is_err() {

@@ -19,9 +19,10 @@ These are the available commands and their syntax. All the patterns are case ins
 - Negative filter: Selects only the lines that don't match the regex filter.
   - Syntax: `n:`*regex*
   - Example: `n:audio`
-- Substitution: Replaces one pattern for another. **Not implemented yet**.
-  - Proposed syntax: `'s:#*regex*#*replacement_text*#'`
-- Time filter: Assuming the lines start with a timestamp (eg: 0:01:10.881123150), selects only the lines between the target start and end timestamps.
-  - Proposed syntax: `t:*begin_timestamp*[-*end_timestamp*]`
+- Substitution: Replaces one pattern for another.
+  - Proposed syntax: `'s:#`*regex*`#`*replacement_text*`#'`
+  - Examples: `s:#pattern#replacement`, `'s:/(?<adjective>big|small)/${{adjective}}ish'` (Any delimiter character is supported. See the syntax for capture groups [here](https://docs.rs/regex/latest/regex/bytes/struct.Regex.html#method.replace))
+- Time filter: Assuming the lines start with a timestamp (eg: 0:01:10.881123150), selects only the lines between the target start and end timestamps. **Not implemented yet**.
+  - Proposed syntax: `t:`*begin_timestamp*[`-`*end_timestamp*]
 
 Note that all these commands are executed in order, so you can easily refine the behaviour by carefully choosing commands in the right order. For instance `sourcebuffer h:true h:false 'h:[0-9]:[0-9:.]*[0-9]' n:enqueue` will select only the lines containing the "sourcebuffer" word (highlighting the word). Then on those selected lines, highlight the words "true" and "false", as well as any timestamp that may appear in the line (in 3 different colors). If any of the lines contains the "enqueue" word, they will be discarded and not shown.
