@@ -5,13 +5,13 @@ use ansi_term::{Style,Colour};
 
 const MAX_COLOURS : u16 = 256;
 
-// Example parameters: sourcebuffer h:true h:false 'h:[0-9]:[0-9:.]*[0-9]' n:enqueue
+// Example parameters: sourcebuffer h:true h:false 'h:[0-9]:[0-9:.]*[0-9]' n:enqueue 's:#apple#strawberry'
 
 const OPTION_FILTER : &str = "fc:";
 const OPTION_FILTER_NO_HIGHLIGHT : &str = "fn:";
 const OPTION_HIGHLIGHT : &str = "h:";
 const OPTION_NEGATIVE_FILTER : &str = "n:";
-// TODO: const OPTION_SUBSTITUTION : &str = "s:";
+const OPTION_SUBSTITUTION : &str = "s:";
 
 #[derive(Debug)]
 pub enum Command {
@@ -19,6 +19,8 @@ pub enum Command {
     Filter(Regex, Style, /* negative */ bool, /* highlight */ bool),
     // Highlights the matched text (if present). Doesn't discard the current line.
     Highlight(Regex, Style),
+    // Searches and replaces the matched text (if present). Doesn't discard the current line.
+    Substitution(Regex, String),
 }
 
 // Holds the context to process each line. Context would be a list of words to
@@ -73,6 +75,20 @@ impl Context {
                     return Err(anyhow::anyhow!(format!("{:?}", regex.err().unwrap())));
                 }
                 commands.push_back(Command::Filter(regex.unwrap(), styles.pop_front().unwrap(), true, false));
+            } else if command_arg.starts_with(OPTION_SUBSTITUTION) {
+                command_arg = command_arg.drain(OPTION_SUBSTITUTION.len()..).collect();
+                let delimiter = command_arg.chars().next().unwrap().to_string();
+                command_arg = command_arg.drain(delimiter.len()..).collect();
+                let tokens : Vec<&str> = command_arg.split(&delimiter).collect();
+                if tokens.len() != 2 {
+                    return Err(anyhow::anyhow!("Substitution command \"s:\" requires two expressions. Examples: s:#pattern#replacement s:/pattern/replacement"));
+                }
+                let regex = RegexBuilder::new(&tokens[0]).case_insensitive(true).build();
+                if regex.is_err() {
+                    return Err(anyhow::anyhow!(format!("{:?}", regex.err().unwrap())));
+                }
+                let replacement = tokens[1].to_string();
+                commands.push_back(Command::Substitution(regex.unwrap(), replacement));
             } else {
                 // Filters can be specified with "fc:" (that's why we remove the header) or just with "" (that's why we're in an else)
                 if command_arg.starts_with(OPTION_FILTER) {
@@ -106,7 +122,8 @@ pub enum LineSelection {
 fn process_line(line: &String, context: &Context) {
     const DEBUG : bool = false;
 
-    let mut out_line: String = line.clone();
+    let mut in_line: String = line.clone();
+    let mut out_line: String = in_line.clone();
 
     if DEBUG { print!("--> {}", out_line); }
 
@@ -118,11 +135,11 @@ fn process_line(line: &String, context: &Context) {
         match command {
             Command::Filter(regex, style, negative, highlight) => {
                 if *negative {
-                    if regex.is_match(line.as_bytes()) {
+                    if regex.is_match(in_line.as_bytes()) {
                         line_selection = LineSelection::ExplicitlyForbidden;
                     }
                 } else {
-                    if regex.is_match(line.as_bytes()) && line_selection != LineSelection::ExplicitlyForbidden {
+                    if regex.is_match(in_line.as_bytes()) && line_selection != LineSelection::ExplicitlyForbidden {
                         line_selection = LineSelection::ExplicitlyAllowed;
                     } else {
                         fn is_positive_filter(next_command: &Command) -> bool {
@@ -158,6 +175,16 @@ fn process_line(line: &String, context: &Context) {
                     style.paint("$0").to_string().as_bytes()
                 ).to_vec()).expect("Wrong UTF-8 conversion");
             },
+            Command::Substitution(regex, replacement) => {
+                in_line = String::from_utf8(regex.replace_all(
+                    in_line.as_bytes(),
+                    replacement.as_bytes()
+                ).to_vec()).expect("Wrong UTF-8 conversion");
+                out_line = String::from_utf8(regex.replace_all(
+                    out_line.as_bytes(),
+                    replacement.as_bytes()
+                ).to_vec()).expect("Wrong UTF-8 conversion");
+            }
         }
         if DEBUG { println!("   --> {:?} --> {:?}", command, line_selection); }
     }
