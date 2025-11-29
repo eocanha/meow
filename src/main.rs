@@ -95,14 +95,49 @@ impl Context {
     }
 }
 
+#[derive(PartialEq)]
+#[derive(Debug)]
+pub enum LineSelection {
+    Neutral,
+    ExplicitlyAllowed,
+    ExplicitlyForbidden
+}
+
 fn process_line(line: &String, context: &Context) {
     let mut out_line: String = line.clone();
-    let mut some_command_has_matched = false;
-    for command in &context.commands {
+    let mut line_selection = LineSelection::Neutral;
+    let mut commands_iter = context.commands.iter().peekable();
+    while let Some(command) = commands_iter.next() {
+        let optional_next_command = commands_iter.peek();
+
         match command {
             Command::Filter(regex, style, negative, highlight) => {
-                if !regex.is_match(line.as_bytes()) ^ negative {
-                    continue;
+                if *negative {
+                    if regex.is_match(line.as_bytes()) {
+                        line_selection = LineSelection::ExplicitlyForbidden;
+                    }
+                } else {
+                    if regex.is_match(line.as_bytes()) && line_selection != LineSelection::ExplicitlyForbidden {
+                        line_selection = LineSelection::ExplicitlyAllowed;
+                    } else {
+                        fn is_positive_filter(next_command: &Command) -> bool {
+                            let result = match next_command {
+                                Command::Filter(_, _, negative, _) => !negative,
+                                _ => false,
+                            };
+                            return result;
+                        }
+                        // (Positive) filters that don't match leave the line as Neutral, so
+                        // another (positive) filter can try to select it. However, the last
+                        // (postive) filter in a chain of (positive) filters will reject the
+                        //  line if it doesn't match. Otherwise the chain of (positive)
+                        // filters would act as no filter at all. Negative filters don't
+                        // count for this algorithm, as they are "a posteriori" filters.
+                        if (optional_next_command.is_none() || !is_positive_filter(optional_next_command.unwrap()))
+                            && line_selection != LineSelection::ExplicitlyAllowed {
+                            line_selection = LineSelection::ExplicitlyForbidden;
+                        }
+                    }
                 }
                 if *highlight {
                     out_line = String::from_utf8(regex.replace_all(
@@ -110,18 +145,16 @@ fn process_line(line: &String, context: &Context) {
                         style.paint("$0").to_string().as_bytes()
                     ).to_vec()).expect("Wrong UTF-8 conversion");
                 }
-                some_command_has_matched = true;
             },
             Command::Highlight(regex, style) => {
                 out_line = String::from_utf8(regex.replace_all(
                     out_line.as_bytes(),
                     style.paint("$0").to_string().as_bytes()
                 ).to_vec()).expect("Wrong UTF-8 conversion");
-                some_command_has_matched = true;
             },
         }
     }
-    if some_command_has_matched {
+    if line_selection != LineSelection::ExplicitlyForbidden {
         print!("{}", out_line);
     }
 }
