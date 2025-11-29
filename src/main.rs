@@ -5,13 +5,22 @@ use ansi_term::{Style,Colour};
 
 const MAX_COLOURS : u16 = 256;
 
-// Example parameters: sourcebuffer h:true h:false 'h:[0-9]:[0-9:.]*[0-9]' n:enqueue 's:#apple#strawberry'
+// Example parameters: sourcebuffer h:true h:false 'h:[0-9]:[0-9:.]*[0-9]' n:enqueue 's:#apple#strawberry' ft:0:00:05-0:00:06
 
 const OPTION_FILTER : &str = "fc:";
 const OPTION_FILTER_NO_HIGHLIGHT : &str = "fn:";
 const OPTION_HIGHLIGHT : &str = "h:";
 const OPTION_NEGATIVE_FILTER : &str = "n:";
 const OPTION_SUBSTITUTION : &str = "s:";
+const OPTION_FILTER_TIME : &str = "ft:";
+
+#[derive(PartialEq)]
+#[derive(Debug)]
+pub enum LineSelection {
+    Neutral,
+    ExplicitlyAllowed,
+    ExplicitlyForbidden
+}
 
 #[derive(Debug)]
 pub enum Command {
@@ -21,6 +30,9 @@ pub enum Command {
     Highlight(Regex, Style),
     // Searches and replaces the matched text (if present). Doesn't discard the current line.
     Substitution(Regex, String),
+    // Filters lines that start with a timestamp (a number) and are between begin and end
+    // values. If begin or end and empty strings, they are ignored.
+    FilterTime(/* time_regex */ Regex, /* begin */ String, /* end */ String),
 }
 
 // Holds the context to process each line. Context would be a list of words to
@@ -28,7 +40,11 @@ pub enum Command {
 // done on lines. It should be like a list of commands to apply to lines.
 #[derive(Debug)]
 pub struct Context {
+    // Sequence of commands to apply to each line.
     pub commands : VecDeque<Command>,
+    // Signals if a multiple line selection block has started or not.
+    pub multiline_selection : LineSelection,
+    pub forbid_next_line : bool,
 }
 
 impl Context {
@@ -52,6 +68,7 @@ impl Context {
         }
 
         let mut commands: VecDeque<Command> = VecDeque::new();
+        let mut multiline_selection = LineSelection::Neutral;
 
         for mut command_arg in command_args {
             if command_arg.starts_with(OPTION_FILTER_NO_HIGHLIGHT) {
@@ -89,6 +106,18 @@ impl Context {
                 }
                 let replacement = tokens[1].to_string();
                 commands.push_back(Command::Substitution(regex.unwrap(), replacement));
+            } else if command_arg.starts_with(OPTION_FILTER_TIME) {
+                command_arg = command_arg.drain(OPTION_FILTER_TIME.len()..).collect();
+                let delimiter = "-".to_string();
+                let tokens : Vec<&str> = command_arg.split(&delimiter).collect();
+                if tokens.len() != 2 {
+                    return Err(anyhow::anyhow!("Filter time command \"ft:\" requires two expressions (even if they're empty). Examples: ft:0:00:05-0:00:06 ft:0:00:05- ft:-0:00:06"));
+                }
+                if !tokens[0].is_empty() {
+                    multiline_selection = LineSelection::ExplicitlyForbidden;
+                }
+                let time_regex = RegexBuilder::new(r"^[0-9][0-9:.]*").case_insensitive(true).build();
+                commands.push_back(Command::FilterTime(time_regex.unwrap(), tokens[0].to_string(), tokens[1].to_string()));
             } else {
                 // Filters can be specified with "fc:" (that's why we remove the header) or just with "" (that's why we're in an else)
                 if command_arg.starts_with(OPTION_FILTER) {
@@ -102,24 +131,24 @@ impl Context {
             }
         }
 
-        Ok(Context {commands})
+        Ok(Context {
+            commands,
+            multiline_selection,
+            forbid_next_line: false
+        })
     }
 
     pub fn empty() -> Self {
         let commands: VecDeque<Command> = VecDeque::new();
-        Context { commands }
+        Context {
+            commands,
+            multiline_selection: LineSelection::Neutral,
+            forbid_next_line: false
+        }
     }
 }
 
-#[derive(PartialEq)]
-#[derive(Debug)]
-pub enum LineSelection {
-    Neutral,
-    ExplicitlyAllowed,
-    ExplicitlyForbidden
-}
-
-fn process_line(line: &String, context: &Context) {
+fn process_line(line: &String, context: &mut Context) {
     const DEBUG : bool = false;
 
     let mut in_line: String = line.clone();
@@ -134,6 +163,7 @@ fn process_line(line: &String, context: &Context) {
 
         match command {
             Command::Filter(regex, style, negative, highlight) => {
+                if context.multiline_selection == LineSelection::ExplicitlyForbidden { continue; }
                 if *negative {
                     if regex.is_match(in_line.as_bytes()) {
                         line_selection = LineSelection::ExplicitlyForbidden;
@@ -170,12 +200,15 @@ fn process_line(line: &String, context: &Context) {
                 }
             },
             Command::Highlight(regex, style) => {
+                if context.multiline_selection == LineSelection::ExplicitlyForbidden { continue; }
                 out_line = String::from_utf8(regex.replace_all(
                     out_line.as_bytes(),
                     style.paint("$0").to_string().as_bytes()
                 ).to_vec()).expect("Wrong UTF-8 conversion");
             },
             Command::Substitution(regex, replacement) => {
+                // Substitutions must be done for every line independently of multiline_selection,
+                // because, as they change stuff, they can influence on the FilterTime pattern matching.
                 in_line = String::from_utf8(regex.replace_all(
                     in_line.as_bytes(),
                     replacement.as_bytes()
@@ -185,17 +218,40 @@ fn process_line(line: &String, context: &Context) {
                     replacement.as_bytes()
                 ).to_vec()).expect("Wrong UTF-8 conversion");
             }
+            Command::FilterTime(time_regex, begin, end) => {
+                if context.forbid_next_line {
+                    context.forbid_next_line = false;
+                    context.multiline_selection = LineSelection::ExplicitlyForbidden;
+                } else {
+                    if !time_regex.is_match(in_line.to_string().as_bytes()) { continue; }
+                    if context.multiline_selection != LineSelection::ExplicitlyAllowed
+                        && !begin.is_empty() && &in_line >= begin && (end.is_empty()
+                            || !end.is_empty() && &in_line[0..end.len()] <= end) {
+                        context.multiline_selection = LineSelection::ExplicitlyAllowed;
+                    }
+                    if context.multiline_selection != LineSelection::ExplicitlyForbidden && !end.is_empty() {
+                        if &in_line[0..end.len()] == end {
+                            // We want to print the last matched line if it still matches exactly
+                            // with the time, so we start forbidding on next line.
+                            context.forbid_next_line = true;
+                        } else if &in_line[0..end.len()] > end {
+                            // But if it has a later time, we already forbid this line.
+                            context.multiline_selection = LineSelection::ExplicitlyForbidden;
+                        }
+                    }
+                }
+            }
         }
         if DEBUG { println!("   --> {:?} --> {:?}", command, line_selection); }
     }
-    if line_selection != LineSelection::ExplicitlyForbidden {
+    if line_selection != LineSelection::ExplicitlyForbidden && context.multiline_selection != LineSelection::ExplicitlyForbidden {
         if DEBUG { print!("Result: {}", out_line); }
         else { print!("{}", out_line); }
     }
     if DEBUG { println!("------"); }
 }
 
-fn process_all(stdin: std::io::Stdin, context: Context) {
+fn process_all(stdin: std::io::Stdin, mut context: Context) {
     let mut line = String::new();
     let mut exit = false;
     while !exit {
@@ -203,7 +259,7 @@ fn process_all(stdin: std::io::Stdin, context: Context) {
         match stdin.read_line(&mut line) {
             Ok(n) => {
                 if n > 0 {
-                    process_line(&line, &context);
+                    process_line(&line, &mut context);
                 } else {
                     exit = true;
                 }
