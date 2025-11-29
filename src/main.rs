@@ -23,6 +23,13 @@ pub enum LineSelection {
 }
 
 #[derive(Debug)]
+pub struct MultilineSelectionState {
+    // Signals if a multiple line selection block has started or not.
+    pub multiline_selection : LineSelection,
+    pub forbid_next_line : bool,
+}
+
+#[derive(Debug)]
 pub enum Command {
     // Discards the line if no substring matches Filter, otherwise highlights the matched text
     Filter(Regex, Style, /* negative */ bool, /* highlight */ bool),
@@ -42,9 +49,7 @@ pub enum Command {
 pub struct Context {
     // Sequence of commands to apply to each line.
     pub commands : VecDeque<Command>,
-    // Signals if a multiple line selection block has started or not.
-    pub multiline_selection : LineSelection,
-    pub forbid_next_line : bool,
+    pub multiline_selection_state : MultilineSelectionState,
 }
 
 impl Context {
@@ -133,8 +138,10 @@ impl Context {
 
         Ok(Context {
             commands,
-            multiline_selection,
-            forbid_next_line: false
+            multiline_selection_state: MultilineSelectionState {
+                multiline_selection,
+                forbid_next_line: false
+            }
         })
     }
 
@@ -142,8 +149,10 @@ impl Context {
         let commands: VecDeque<Command> = VecDeque::new();
         Context {
             commands,
-            multiline_selection: LineSelection::Neutral,
-            forbid_next_line: false
+            multiline_selection_state: MultilineSelectionState {
+                multiline_selection: LineSelection::Neutral,
+                forbid_next_line: false
+            }
         }
     }
 }
@@ -163,7 +172,7 @@ fn process_line(line: &String, context: &mut Context) {
 
         match command {
             Command::Filter(regex, style, negative, highlight) => {
-                if context.multiline_selection == LineSelection::ExplicitlyForbidden { continue; }
+                if context.multiline_selection_state.multiline_selection == LineSelection::ExplicitlyForbidden { continue; }
                 if *negative {
                     if regex.is_match(in_line.as_bytes()) {
                         line_selection = LineSelection::ExplicitlyForbidden;
@@ -200,7 +209,7 @@ fn process_line(line: &String, context: &mut Context) {
                 }
             },
             Command::Highlight(regex, style) => {
-                if context.multiline_selection == LineSelection::ExplicitlyForbidden { continue; }
+                if context.multiline_selection_state.multiline_selection == LineSelection::ExplicitlyForbidden { continue; }
                 out_line = String::from_utf8(regex.replace_all(
                     out_line.as_bytes(),
                     style.paint("$0").to_string().as_bytes()
@@ -219,24 +228,24 @@ fn process_line(line: &String, context: &mut Context) {
                 ).to_vec()).expect("Wrong UTF-8 conversion");
             }
             Command::FilterTime(time_regex, begin, end) => {
-                if context.forbid_next_line {
-                    context.forbid_next_line = false;
-                    context.multiline_selection = LineSelection::ExplicitlyForbidden;
+                if context.multiline_selection_state.forbid_next_line {
+                    context.multiline_selection_state.forbid_next_line = false;
+                    context.multiline_selection_state.multiline_selection = LineSelection::ExplicitlyForbidden;
                 } else {
                     if !time_regex.is_match(in_line.to_string().as_bytes()) { continue; }
-                    if context.multiline_selection != LineSelection::ExplicitlyAllowed
+                    if context.multiline_selection_state.multiline_selection != LineSelection::ExplicitlyAllowed
                         && !begin.is_empty() && &in_line >= begin && (end.is_empty()
                             || !end.is_empty() && &in_line[0..end.len()] <= end) {
-                        context.multiline_selection = LineSelection::ExplicitlyAllowed;
+                        context.multiline_selection_state.multiline_selection = LineSelection::ExplicitlyAllowed;
                     }
-                    if context.multiline_selection != LineSelection::ExplicitlyForbidden && !end.is_empty() {
+                    if context.multiline_selection_state.multiline_selection != LineSelection::ExplicitlyForbidden && !end.is_empty() {
                         if &in_line[0..end.len()] == end {
                             // We want to print the last matched line if it still matches exactly
                             // with the time, so we start forbidding on next line.
-                            context.forbid_next_line = true;
+                            context.multiline_selection_state.forbid_next_line = true;
                         } else if &in_line[0..end.len()] > end {
                             // But if it has a later time, we already forbid this line.
-                            context.multiline_selection = LineSelection::ExplicitlyForbidden;
+                            context.multiline_selection_state.multiline_selection = LineSelection::ExplicitlyForbidden;
                         }
                     }
                 }
@@ -244,7 +253,7 @@ fn process_line(line: &String, context: &mut Context) {
         }
         if DEBUG { println!("   --> {:?} --> {:?}", command, line_selection); }
     }
-    if line_selection != LineSelection::ExplicitlyForbidden && context.multiline_selection != LineSelection::ExplicitlyForbidden {
+    if line_selection != LineSelection::ExplicitlyForbidden && context.multiline_selection_state.multiline_selection != LineSelection::ExplicitlyForbidden {
         if DEBUG { print!("Result: {}", out_line); }
         else { print!("{}", out_line); }
     }
