@@ -20,8 +20,8 @@ These are the available commands and their syntax. All the patterns are case ins
   - Syntax: `n:`*regex*
   - Example: `n:audio`
 - Substitution: Replaces one pattern for another.
-  - Syntax: `'s:#`*regex*`#`*replacement_text*`#'`
-  - Examples: `s:#pattern#replacement`, `'s:/(?<adjective>big|small)/${{adjective}}ish'` (Any delimiter character is supported. See the syntax for capture groups [here](https://docs.rs/regex/latest/regex/bytes/struct.Regex.html#method.replace))
+  - Syntax: `'s:#`*regex*`#`*replacement_text*`'`
+  - Examples: `s:#pattern#replacement`, `'s:/(?<adjective>big|small)/${adjective}ish'` (Any delimiter character is supported. See the syntax for capture groups [here](https://docs.rs/regex/latest/regex/bytes/struct.Regex.html#method.replace))
 - Time filter: Assuming the lines start with a timestamp (eg: 0:01:10.881123150), selects only the lines between the target start and end timestamps. Specifying multiple time filters will generate matches that fit on any of the time ranges. Overlapping ranges should work, but better don't use them.
   - Syntax: `ft:`[*begin_timestamp*]`-`[*end_timestamp*]
   - Examples: `ft:0:00:24.787450146-0:00:24.790741865`, `ft:0:00:24.787450146-`, `ft:-0:00:24.790741865`, `ft:-`

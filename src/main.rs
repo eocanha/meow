@@ -4,8 +4,90 @@ use regex::bytes::Regex;
 use regex::bytes::RegexBuilder;
 use ansi_term::{Style,Colour};
 
+macro_rules! HELP_TEXT {() => (
+r###"
+Usage: {binary_name} [OPTION]... [COMMAND]...
+Reads text from stdin and processes it by applying the commands to every line.
+
+Options:
+  -h, --help    This usage help.
+
+Commands:
+  REGEX, fc:REGEX     Filters the line and only prints it if it contains text
+                      matching the specified regular expression. Every filter
+                      command will be highlighted in a different color.
+  fn:REGEX            Filtering without highlighting. Same as fc:, but without
+                      highlighting the matched string. 
+  n:REGEX             Negative filter. Selects only the lines that don't
+                      match the regex filter.
+  s:/REGEX/REPLACE    Substitution. Replaces one pattern for another. Any other
+                      delimiter character can be used instead of /, it that's
+                      more convenient to the user.
+  ft:[TIME]-[TIME]    Time filter. Assuming the lines start with a TIME,
+                      selects only the lines between the target start and end
+                      TIME. Any of the TIME arguments (or both) can be omitted,
+                      but the delimiter (-) must be present. Specifying multiple
+                      time filters will generate matches that fit on any of the
+                      time ranges. Overlapping ranges can trigger undefined
+                      behaviour.
+  ht:                 Highlight threads. Assuming a GStreamer log, where the
+                      thread id appears as the third word in the line,
+                      highlights each thread in a different color.
+
+The REGEX pattern is a regular expression. All the matches are case insensitive.
+When used for substitutions, capture groups can be defined as
+(?CAPTURE_NAMEREGEX). See examples at the bottom.
+
+The REPLACEment string is the text that the REGEX will be replaced by when doing
+substitutions. Text captured by a named capture group can be referred to by
+${{CAPTURE_NAME}}. See examples at the bottom.
+
+The TIME pattern can be any sequence of numbers, colon (:) or dot (.).
+Typically, it will be a GStreamer timestamp (eg: 0:01:10.881123150), but it
+actually can be any other numerical sequence. Times are compared
+lexicographically, so it's important that all of them have the same string
+length.
+
+Examples:
+
+- Select lines with the word "one", or the word "orange", or a number,
+  highlighting each pattern in a different color except the number which will
+  have no color:
+
+    {binary_name} one fc:orange 'fn:[0-9][0-9]*'
+
+    000 one small orange
+    005 one big orange
+
+- Assuming a pictures filename listing, select filenames not ending in "jpg"
+  nor it "jpeg", and renames the filename to ".bak" preserving the extension at
+  the end.
+
+    {binary_name} 'n:jpe?g' 's:#^(?<f>[^.]*)(?<e>[.].*)$#${{f}}.bak${{e}}'
+
+    train.bak.png
+    sunset.bak.gif
+
+- Only print the log lines with times between 0:00:24.787450146 and
+  0:00:24.790741865 or those at 0:00:30.492576587 or after and highlight every
+  thread in a different color (shown as [0x1ee2320] and <0x1f01598> in the
+  example text):
+
+    {binary_name} ft:0:00:24.787450146-0:00:24.790741865 \
+      ft:0:00:30.492576587- ht:
+
+    0:00:24.787450146   739  [0x1ee2320] DEBUG ...
+    0:00:24.790382735   739  <0x1f01598> INFO  ...
+    0:00:24.790741865   739  [0x1ee2320] DEBUG ...
+    0:00:30.492576587   739  [0x1f01598] DEBUG ...
+    0:00:31.938743646   739  [0x1f01598] ERROR ...
+"###
+)}
+
 // Example parameters: sourcebuffer h:true h:false 'h:[0-9]:[0-9:.]*[0-9]' n:enqueue 's:#apple#strawberry' ft:0:00:05-0:00:06
 
+const OPTION_HELP_SHORT : &str = "-h";
+const OPTION_HELP : &str = "--help";
 const OPTION_FILTER : &str = "fc:";
 const OPTION_FILTER_NO_HIGHLIGHT : &str = "fn:";
 const OPTION_HIGHLIGHT : &str = "h:";
@@ -113,50 +195,67 @@ pub enum Command {
     HighlightThreads,
 }
 
+#[derive(Debug)]
+pub enum Option {
+    // -h, --help.
+    Help,
+}
+
 // Holds the context to process each line. Context would be a list of words to
 // match (with colors), things to memorize, or other kind of commands to be
 // done on lines. It should be like a list of commands to apply to lines.
 #[derive(Debug)]
 pub struct Context {
+    // Command line options other than line processing commands.
+    pub options : VecDeque<Option>,
     // Sequence of commands to apply to each line.
     pub commands : VecDeque<Command>,
+    // Internal global states needed for some commands.
     pub multiline_selection_state : MultilineSelectionState,
     pub highlight_threads_state : HighlightThreadsState,
 }
 
 impl Context {
-    pub fn new(command_args: Vec<String>) -> anyhow::Result<Self> {
+    pub fn new(args: Vec<String>) -> anyhow::Result<Self> {
+        let mut options : VecDeque<Option> = VecDeque::new();
         let mut styles = StyleGenerator::new(false, true, true);
         let mut commands: VecDeque<Command> = VecDeque::new();
         let mut multiline_selection = LineSelection::Neutral;
 
-        for mut command_arg in command_args {
-            if command_arg.starts_with(OPTION_FILTER_NO_HIGHLIGHT) {
-                command_arg = command_arg.drain(OPTION_FILTER_NO_HIGHLIGHT.len()..).collect();
-                let regex = RegexBuilder::new(&command_arg).case_insensitive(true).build();
+        for mut arg in args {
+            if arg.starts_with("-") {
+                if arg == OPTION_HELP || arg == OPTION_HELP_SHORT {
+                    options.push_back(Option::Help);
+                    break; // Don't process any other option.
+                } else {
+                    return Err(anyhow::anyhow!(format!("Invalid option: {:}. Use -h for help.", arg)));
+                }
+            } else if arg.starts_with(OPTION_FILTER_NO_HIGHLIGHT) {
+                arg = arg.drain(OPTION_FILTER_NO_HIGHLIGHT.len()..).collect();
+                let regex = RegexBuilder::new(&arg).case_insensitive(true).build();
                 if regex.is_err() {
                     return Err(anyhow::anyhow!(format!("{:?}", regex.err().unwrap())));
                 }
                 commands.push_back(Command::Filter(regex.unwrap(), styles.next(), false, false));
-            } else if command_arg.starts_with(OPTION_HIGHLIGHT) {
-                command_arg = command_arg.drain(OPTION_HIGHLIGHT.len()..).collect();
-                let regex = RegexBuilder::new(&command_arg).case_insensitive(true).build();
+            } else if arg.starts_with(OPTION_HIGHLIGHT) {
+                arg = arg.drain(OPTION_HIGHLIGHT.len()..).collect();
+                let regex = RegexBuilder::new(&arg).case_insensitive(true).build();
                 if regex.is_err() {
                     return Err(anyhow::anyhow!(format!("{:?}", regex.err().unwrap())));
                 }
                 commands.push_back(Command::Highlight(regex.unwrap(), styles.next()));
-            } else if command_arg.starts_with(OPTION_NEGATIVE_FILTER) {
-                command_arg = command_arg.drain(OPTION_NEGATIVE_FILTER.len()..).collect();
-                let regex = RegexBuilder::new(&command_arg).case_insensitive(true).build();
+            } else if arg.starts_with(OPTION_NEGATIVE_FILTER) {
+                arg = arg.drain(OPTION_NEGATIVE_FILTER.len()..).collect();
+                let regex = RegexBuilder::new(&arg).case_insensitive(true).build();
                 if regex.is_err() {
                     return Err(anyhow::anyhow!(format!("{:?}", regex.err().unwrap())));
                 }
                 commands.push_back(Command::Filter(regex.unwrap(), styles.next(), true, false));
-            } else if command_arg.starts_with(OPTION_SUBSTITUTION) {
-                command_arg = command_arg.drain(OPTION_SUBSTITUTION.len()..).collect();
-                let delimiter = command_arg.chars().next().unwrap().to_string();
-                command_arg = command_arg.drain(delimiter.len()..).collect();
-                let tokens : Vec<&str> = command_arg.split(&delimiter).collect();
+            } else if arg.starts_with(OPTION_SUBSTITUTION) {
+                arg = arg.drain(OPTION_SUBSTITUTION.len()..).collect();
+                let delimiter = arg.chars().next().unwrap().to_string();
+                arg = arg.drain(delimiter.len()..).collect();
+                let tokens : Vec<&str> = arg.split(&delimiter).collect();
                 if tokens.len() != 2 {
                     return Err(anyhow::anyhow!("Substitution command \"s:\" requires two expressions. Examples: s:#pattern#replacement 's:/(?<adjective>big|small)/${{adjective}}ish'"));
                 }
@@ -166,10 +265,10 @@ impl Context {
                 }
                 let replacement = tokens[1].to_string();
                 commands.push_back(Command::Substitution(regex.unwrap(), replacement));
-            } else if command_arg.starts_with(OPTION_FILTER_TIME) {
-                command_arg = command_arg.drain(OPTION_FILTER_TIME.len()..).collect();
+            } else if arg.starts_with(OPTION_FILTER_TIME) {
+                arg = arg.drain(OPTION_FILTER_TIME.len()..).collect();
                 let delimiter = "-".to_string();
-                let tokens : Vec<&str> = command_arg.split(&delimiter).collect();
+                let tokens : Vec<&str> = arg.split(&delimiter).collect();
                 if tokens.len() != 2 {
                     return Err(anyhow::anyhow!("Filter time command \"ft:\" requires two expressions (even if they're empty). Examples: ft:0:00:05-0:00:06 ft:0:00:05- ft:-0:00:06"));
                 }
@@ -178,14 +277,14 @@ impl Context {
                 }
                 let time_regex = RegexBuilder::new(r"^[0-9][0-9:.]*").case_insensitive(true).build();
                 commands.push_back(Command::FilterTime(time_regex.unwrap(), tokens[0].to_string(), tokens[1].to_string()));
-            } else if command_arg.starts_with(OPTION_HIGHLIGHT_THREADS) {
+            } else if arg.starts_with(OPTION_HIGHLIGHT_THREADS) {
                 commands.push_back(Command::HighlightThreads);
             } else {
                 // Filters can be specified with "fc:" (that's why we remove the header) or just with "" (that's why we're in an else)
-                if command_arg.starts_with(OPTION_FILTER) {
-                    command_arg = command_arg.drain(OPTION_FILTER.len()..).collect();
+                if arg.starts_with(OPTION_FILTER) {
+                    arg = arg.drain(OPTION_FILTER.len()..).collect();
                 }
-                let regex = RegexBuilder::new(&command_arg).case_insensitive(true).build();
+                let regex = RegexBuilder::new(&arg).case_insensitive(true).build();
                 if regex.is_err() {
                     return Err(anyhow::anyhow!(format!("{:?}", regex.err().unwrap())));
                 }
@@ -194,6 +293,7 @@ impl Context {
         }
 
         Ok(Context {
+            options,
             commands,
             multiline_selection_state: MultilineSelectionState {
                 multiline_selection,
@@ -204,9 +304,9 @@ impl Context {
     }
 
     pub fn empty() -> Self {
-        let commands: VecDeque<Command> = VecDeque::new();
         Context {
-            commands,
+            options: VecDeque::new(),
+            commands: VecDeque::new(),
             multiline_selection_state: MultilineSelectionState {
                 multiline_selection: LineSelection::Neutral,
                 forbid_next_line: false
@@ -367,6 +467,16 @@ fn main() {
             std::process::exit(1);
         }
     };
+
+    for option in &context.options {
+        match option {
+            Option::Help => {
+                let binary_name = std::env::args().next().unwrap();
+                eprintln!(HELP_TEXT!(), binary_name = binary_name);
+                std::process::exit(0);
+            },
+        }
+    }
 
     let stdin = std::io::stdin();
     process_all(stdin, context);
