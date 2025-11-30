@@ -1,9 +1,8 @@
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use regex::bytes::Regex;
 use regex::bytes::RegexBuilder;
 use ansi_term::{Style,Colour};
-
-const MAX_COLOURS : u16 = 256;
 
 // Example parameters: sourcebuffer h:true h:false 'h:[0-9]:[0-9:.]*[0-9]' n:enqueue 's:#apple#strawberry' ft:0:00:05-0:00:06
 
@@ -13,6 +12,52 @@ const OPTION_HIGHLIGHT : &str = "h:";
 const OPTION_NEGATIVE_FILTER : &str = "n:";
 const OPTION_SUBSTITUTION : &str = "s:";
 const OPTION_FILTER_TIME : &str = "ft:";
+const OPTION_HIGHLIGHT_THREADS : &str = "ht:";
+
+#[derive(Debug)]
+pub struct StyleGenerator {
+    count : u8,
+    fg : u8,
+    bg : u8,
+    reverse : bool,
+    bold : bool,
+    underline : bool,
+}
+
+impl StyleGenerator {
+    pub fn new(reverse : bool, bold : bool, underline : bool) -> StyleGenerator {
+        return StyleGenerator {
+            count: 0,
+            fg: 0,
+            bg: 0,
+            reverse: reverse,
+            bold: bold,
+            underline: underline,
+        }
+    }
+
+    fn forward(&mut self) {
+        loop {
+            self.fg = (self.fg + 1) % 16;
+            if self.fg == 0 {
+                self.fg = 0;
+                self.bg = (self.bg + 1) % 16;
+            }
+            if self.fg != self.bg { break; }
+        }
+        self.count += 1;
+    }
+
+    pub fn next(&mut self) -> Style {
+        self.forward();
+        let mut result = Style::new().on(Colour::Fixed(self.bg))
+            .fg(Colour::Fixed(self.fg));
+        if self.reverse { result = result.reverse(); }
+        if self.bold { result = result.bold(); }
+        if self.underline { result = result.underline(); }
+        result
+    }
+}
 
 #[derive(PartialEq)]
 #[derive(Debug)]
@@ -23,9 +68,32 @@ pub enum LineSelection {
 }
 
 #[derive(Debug)]
+pub struct HighlightThreadsIdData {
+    pub style : Style,
+    pub regex : Regex,
+}
+
+#[derive(Debug)]
+pub struct HighlightThreadsState {
+    pub ids : HashMap</* id */ String, /* data */ HighlightThreadsIdData>,
+    pub styles : StyleGenerator,
+}
+
+impl HighlightThreadsState {
+    pub fn new() -> HighlightThreadsState {
+        HighlightThreadsState {
+            ids: HashMap::new(),
+            styles: StyleGenerator::new(true, true, false)
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct MultilineSelectionState {
     // Signals if a multiple line selection block has started or not.
     pub multiline_selection : LineSelection,
+    // Used by the MultilineSelection algorithm in process_line() to set
+    // multiline_selection = ExplicitlyForbidden when the next line is processed.
     pub forbid_next_line : bool,
 }
 
@@ -40,6 +108,9 @@ pub enum Command {
     // Filters lines that start with a timestamp (a number) and are between begin and end
     // values. If begin or end and empty strings, they are ignored.
     FilterTime(/* time_regex */ Regex, /* begin */ String, /* end */ String),
+    // Assuming a GStreamer log format, locates the different thread ids and assigns a different
+    // style to each of them.
+    HighlightThreads,
 }
 
 // Holds the context to process each line. Context would be a list of words to
@@ -50,28 +121,12 @@ pub struct Context {
     // Sequence of commands to apply to each line.
     pub commands : VecDeque<Command>,
     pub multiline_selection_state : MultilineSelectionState,
+    pub highlight_threads_state : HighlightThreadsState,
 }
 
 impl Context {
     pub fn new(command_args: Vec<String>) -> anyhow::Result<Self> {
-        let mut styles: VecDeque<Style> = VecDeque::new();
-        let mut count = 0;
-        for bg in 0..15 {
-            for fg in 0..15 {
-                if fg == bg {
-                    continue;
-                }
-                styles.push_back(Style::new().on(Colour::Fixed(bg)).fg(Colour::Fixed(fg)).bold().underline());
-                count += 1;
-                if count > MAX_COLOURS {
-                    break;
-                }
-            }
-            if count > MAX_COLOURS {
-                break;
-            }
-        }
-
+        let mut styles = StyleGenerator::new(false, true, true);
         let mut commands: VecDeque<Command> = VecDeque::new();
         let mut multiline_selection = LineSelection::Neutral;
 
@@ -82,21 +137,21 @@ impl Context {
                 if regex.is_err() {
                     return Err(anyhow::anyhow!(format!("{:?}", regex.err().unwrap())));
                 }
-                commands.push_back(Command::Filter(regex.unwrap(), styles.pop_front().unwrap(), false, false));
+                commands.push_back(Command::Filter(regex.unwrap(), styles.next(), false, false));
             } else if command_arg.starts_with(OPTION_HIGHLIGHT) {
                 command_arg = command_arg.drain(OPTION_HIGHLIGHT.len()..).collect();
                 let regex = RegexBuilder::new(&command_arg).case_insensitive(true).build();
                 if regex.is_err() {
                     return Err(anyhow::anyhow!(format!("{:?}", regex.err().unwrap())));
                 }
-                commands.push_back(Command::Highlight(regex.unwrap(), styles.pop_front().unwrap()));
+                commands.push_back(Command::Highlight(regex.unwrap(), styles.next()));
             } else if command_arg.starts_with(OPTION_NEGATIVE_FILTER) {
                 command_arg = command_arg.drain(OPTION_NEGATIVE_FILTER.len()..).collect();
                 let regex = RegexBuilder::new(&command_arg).case_insensitive(true).build();
                 if regex.is_err() {
                     return Err(anyhow::anyhow!(format!("{:?}", regex.err().unwrap())));
                 }
-                commands.push_back(Command::Filter(regex.unwrap(), styles.pop_front().unwrap(), true, false));
+                commands.push_back(Command::Filter(regex.unwrap(), styles.next(), true, false));
             } else if command_arg.starts_with(OPTION_SUBSTITUTION) {
                 command_arg = command_arg.drain(OPTION_SUBSTITUTION.len()..).collect();
                 let delimiter = command_arg.chars().next().unwrap().to_string();
@@ -123,6 +178,8 @@ impl Context {
                 }
                 let time_regex = RegexBuilder::new(r"^[0-9][0-9:.]*").case_insensitive(true).build();
                 commands.push_back(Command::FilterTime(time_regex.unwrap(), tokens[0].to_string(), tokens[1].to_string()));
+            } else if command_arg.starts_with(OPTION_HIGHLIGHT_THREADS) {
+                commands.push_back(Command::HighlightThreads);
             } else {
                 // Filters can be specified with "fc:" (that's why we remove the header) or just with "" (that's why we're in an else)
                 if command_arg.starts_with(OPTION_FILTER) {
@@ -132,7 +189,7 @@ impl Context {
                 if regex.is_err() {
                     return Err(anyhow::anyhow!(format!("{:?}", regex.err().unwrap())));
                 }
-                commands.push_back(Command::Filter(regex.unwrap(), styles.pop_front().unwrap(), false, true));
+                commands.push_back(Command::Filter(regex.unwrap(), styles.next(), false, true));
             }
         }
 
@@ -141,7 +198,8 @@ impl Context {
             multiline_selection_state: MultilineSelectionState {
                 multiline_selection,
                 forbid_next_line: false
-            }
+            },
+            highlight_threads_state: HighlightThreadsState::new()
         })
     }
 
@@ -152,7 +210,8 @@ impl Context {
             multiline_selection_state: MultilineSelectionState {
                 multiline_selection: LineSelection::Neutral,
                 forbid_next_line: false
-            }
+            },
+            highlight_threads_state: HighlightThreadsState::new()
         }
     }
 }
@@ -160,7 +219,7 @@ impl Context {
 fn process_line(line: &String, context: &mut Context) {
     const DEBUG : bool = false;
 
-    let mut in_line: String = line.clone();
+    let mut in_line: String = line.trim().to_string();
     let mut out_line: String = in_line.clone();
 
     if DEBUG { print!("--> {}", out_line); }
@@ -226,7 +285,7 @@ fn process_line(line: &String, context: &mut Context) {
                     out_line.as_bytes(),
                     replacement.as_bytes()
                 ).to_vec()).expect("Wrong UTF-8 conversion");
-            }
+            },
             Command::FilterTime(time_regex, begin, end) => {
                 if context.multiline_selection_state.forbid_next_line {
                     context.multiline_selection_state.forbid_next_line = false;
@@ -249,13 +308,34 @@ fn process_line(line: &String, context: &mut Context) {
                         }
                     }
                 }
-            }
+            },
+            Command::HighlightThreads => {
+                if context.multiline_selection_state.multiline_selection == LineSelection::ExplicitlyForbidden { continue; }
+                // Thread id is the 3rd field (using tab as separator) in GStreamer logs.
+                if let Some(thread_id) = in_line.split_whitespace().nth(2) {
+                    if !thread_id.starts_with("0x") { continue; }
+                    if !context.highlight_threads_state.ids.contains_key(thread_id) {
+                        context.highlight_threads_state.ids.insert(
+                            thread_id.to_string(),
+                            HighlightThreadsIdData {
+                                style: context.highlight_threads_state.styles.next().reverse(),
+                                regex: RegexBuilder::new(&thread_id).case_insensitive(true).build().unwrap(),
+                            }
+                        );
+                    }
+                    let data = context.highlight_threads_state.ids.get(thread_id).unwrap();
+                    out_line = String::from_utf8(data.regex.replace_all(
+                        out_line.as_bytes(),
+                        data.style.paint("$0").to_string().as_bytes()
+                    ).to_vec()).expect("Wrong UTF-8 conversion");
+                }
+            },
         }
         if DEBUG { println!("   --> {:?} --> {:?}", command, line_selection); }
     }
     if line_selection != LineSelection::ExplicitlyForbidden && context.multiline_selection_state.multiline_selection != LineSelection::ExplicitlyForbidden {
-        if DEBUG { print!("Result: {}", out_line); }
-        else { print!("{}", out_line); }
+        if DEBUG { println!("Result: {}", out_line); }
+        else { println!("{}", out_line); }
     }
     if DEBUG { println!("------"); }
 }
