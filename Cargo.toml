@@ -8,6 +8,7 @@ ansi_term = "0.12.1"
 anyhow = "1.0.100"
 regex = "1.12.2"
 
-[profile.release]
+[profile.performance-profiling]
 # Enable debuginfo for release too
-# debug = true
+inherits = "release"
+debug = true

@@ -7,8 +7,8 @@ build:
 
 # Requires samply. Install with: cargo install samply
 profiling:
-	CARGO_PROFILE_RELEASE_DEBUG=true cargo build --release
-	samply record ./target/release/meow error
+	cargo build --profile performance-profiling
+	samply record ./target/performance-profiling/meow error
 
 clean:
 	cargo clean
