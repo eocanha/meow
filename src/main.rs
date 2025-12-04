@@ -21,6 +21,8 @@ Commands:
                       highlighting the matched string. 
   n:REGEX             Negative filter. Selects only the lines that don't
                       match the regex filter.
+  h:REGEX             Highlight with no filter. Doesn't discard any line, just
+                      highlights the specified regex.
   s:/REGEX/REPLACE    Substitution. Replaces one pattern for another. Any other
                       delimiter character can be used instead of /, it that's
                       more convenient to the user.
