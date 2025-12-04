@@ -1,6 +1,7 @@
 use ansi_term::{Colour, Style};
 use regex::bytes::Regex;
 use regex::bytes::RegexBuilder;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 
@@ -97,7 +98,7 @@ const OPTION_FILTER_TIME: &str = "ft:";
 const OPTION_HIGHLIGHT_THREADS: &str = "ht:";
 
 #[derive(Debug)]
-pub struct StyleGenerator {
+pub struct StyleIterator {
     count: u8,
     fg: u8,
     bg: u8,
@@ -106,16 +107,16 @@ pub struct StyleGenerator {
     underline: bool,
 }
 
-impl StyleGenerator {
-    pub fn new(reverse: bool, bold: bool, underline: bool) -> StyleGenerator {
-        return StyleGenerator {
+impl StyleIterator {
+    pub fn new(reverse: bool, bold: bool, underline: bool) -> StyleIterator {
+        StyleIterator {
             count: 0,
             fg: 0,
             bg: 0,
-            reverse: reverse,
-            bold: bold,
-            underline: underline,
-        };
+            reverse,
+            bold,
+            underline,
+        }
     }
 
     fn forward(&mut self) {
@@ -131,8 +132,12 @@ impl StyleGenerator {
         }
         self.count += 1;
     }
+}
 
-    pub fn next(&mut self) -> Style {
+impl Iterator for StyleIterator {
+    type Item = Style;
+
+    fn next(&mut self) -> Option<Style> {
         self.forward();
         let mut result = Style::new()
             .on(Colour::Fixed(self.bg))
@@ -146,7 +151,7 @@ impl StyleGenerator {
         if self.underline {
             result = result.underline();
         }
-        result
+        Some(result)
     }
 }
 
@@ -166,15 +171,21 @@ pub struct HighlightThreadsIdData {
 #[derive(Debug)]
 pub struct HighlightThreadsState {
     pub ids: HashMap</* id */ String, /* data */ HighlightThreadsIdData>,
-    pub styles: StyleGenerator,
+    pub styles: StyleIterator,
 }
 
 impl HighlightThreadsState {
     pub fn new() -> HighlightThreadsState {
         HighlightThreadsState {
             ids: HashMap::new(),
-            styles: StyleGenerator::new(true, true, false),
+            styles: StyleIterator::new(true, true, false),
         }
+    }
+}
+
+impl Default for HighlightThreadsState {
+    fn default() -> Self {
+        HighlightThreadsState::new()
     }
 }
 
@@ -213,7 +224,7 @@ pub enum Command {
 }
 
 #[derive(Debug)]
-pub enum Option {
+pub enum CommandLineOption {
     // -h, --help.
     Help,
 }
@@ -224,7 +235,7 @@ pub enum Option {
 #[derive(Debug)]
 pub struct Context {
     // Command line options other than line processing commands.
-    pub options: VecDeque<Option>,
+    pub options: VecDeque<CommandLineOption>,
     // Sequence of commands to apply to each line.
     pub commands: VecDeque<Command>,
     // Internal global states needed for some commands.
@@ -234,15 +245,18 @@ pub struct Context {
 
 impl Context {
     pub fn new(args: Vec<String>) -> anyhow::Result<Self> {
-        let mut options: VecDeque<Option> = VecDeque::new();
-        let mut styles = StyleGenerator::new(false, true, true);
+        let mut options: VecDeque<CommandLineOption> = VecDeque::new();
+        let mut styles = StyleIterator::new(false, true, true);
         let mut commands: VecDeque<Command> = VecDeque::new();
         let mut multiline_selection = LineSelection::Neutral;
+        let time_regex = RegexBuilder::new(r"^[0-9][0-9:.]*")
+            .case_insensitive(true)
+            .build();
 
         for mut arg in args {
             if arg.starts_with("-") {
                 if arg == OPTION_HELP || arg == OPTION_HELP_SHORT {
-                    options.push_back(Option::Help);
+                    options.push_back(CommandLineOption::Help);
                     break; // Don't process any other option.
                 } else {
                     return Err(anyhow::anyhow!(format!(
@@ -256,21 +270,31 @@ impl Context {
                 if regex.is_err() {
                     return Err(anyhow::anyhow!(format!("{:?}", regex.err().unwrap())));
                 }
-                commands.push_back(Command::Filter(regex.unwrap(), styles.next(), false, false));
+                commands.push_back(Command::Filter(
+                    regex.unwrap(),
+                    styles.next().unwrap(),
+                    false,
+                    false,
+                ));
             } else if arg.starts_with(OPTION_HIGHLIGHT) {
                 arg = arg.drain(OPTION_HIGHLIGHT.len()..).collect();
                 let regex = RegexBuilder::new(&arg).case_insensitive(true).build();
                 if regex.is_err() {
                     return Err(anyhow::anyhow!(format!("{:?}", regex.err().unwrap())));
                 }
-                commands.push_back(Command::Highlight(regex.unwrap(), styles.next()));
+                commands.push_back(Command::Highlight(regex.unwrap(), styles.next().unwrap()));
             } else if arg.starts_with(OPTION_NEGATIVE_FILTER) {
                 arg = arg.drain(OPTION_NEGATIVE_FILTER.len()..).collect();
                 let regex = RegexBuilder::new(&arg).case_insensitive(true).build();
                 if regex.is_err() {
                     return Err(anyhow::anyhow!(format!("{:?}", regex.err().unwrap())));
                 }
-                commands.push_back(Command::Filter(regex.unwrap(), styles.next(), true, false));
+                commands.push_back(Command::Filter(
+                    regex.unwrap(),
+                    styles.next().unwrap(),
+                    true,
+                    false,
+                ));
             } else if arg.starts_with(OPTION_SUBSTITUTION) {
                 arg = arg.drain(OPTION_SUBSTITUTION.len()..).collect();
                 let delimiter = arg.chars().next().unwrap().to_string();
@@ -281,7 +305,7 @@ impl Context {
                         "Substitution command \"s:\" requires two expressions. Examples: s:#pattern#replacement 's:/(?<adjective>big|small)/${{adjective}}ish'"
                     ));
                 }
-                let regex = RegexBuilder::new(&tokens[0]).case_insensitive(true).build();
+                let regex = RegexBuilder::new(tokens[0]).case_insensitive(true).build();
                 if regex.is_err() {
                     return Err(anyhow::anyhow!(format!("{:?}", regex.err().unwrap())));
                 }
@@ -299,11 +323,8 @@ impl Context {
                 if !tokens[0].is_empty() {
                     multiline_selection = LineSelection::ExplicitlyForbidden;
                 }
-                let time_regex = RegexBuilder::new(r"^[0-9][0-9:.]*")
-                    .case_insensitive(true)
-                    .build();
                 commands.push_back(Command::FilterTime(
-                    time_regex.unwrap(),
+                    time_regex.clone().unwrap(),
                     tokens[0].to_string(),
                     tokens[1].to_string(),
                 ));
@@ -318,7 +339,12 @@ impl Context {
                 if regex.is_err() {
                     return Err(anyhow::anyhow!(format!("{:?}", regex.err().unwrap())));
                 }
-                commands.push_back(Command::Filter(regex.unwrap(), styles.next(), false, true));
+                commands.push_back(Command::Filter(
+                    regex.unwrap(),
+                    styles.next().unwrap(),
+                    false,
+                    true,
+                ));
             }
         }
 
@@ -346,7 +372,7 @@ impl Context {
     }
 }
 
-fn process_line(line: &String, context: &mut Context) {
+fn process_line(line: &str, context: &mut Context) {
     const DEBUG: bool = false;
 
     let mut in_line: String = line.trim().to_string();
@@ -368,6 +394,7 @@ fn process_line(line: &String, context: &mut Context) {
                 {
                     continue;
                 }
+                #[allow(clippy::collapsible_else_if)]
                 if *negative {
                     if regex.is_match(in_line.as_bytes()) {
                         line_selection = LineSelection::ExplicitlyForbidden;
@@ -389,7 +416,7 @@ fn process_line(line: &String, context: &mut Context) {
                                     next_command, result
                                 );
                             }
-                            return result;
+                            result
                         }
                         // (Positive) filters that don't match leave the line as Neutral, so
                         // another (positive) filter can try to select it. However, the last
@@ -405,6 +432,7 @@ fn process_line(line: &String, context: &mut Context) {
                         }
                     }
                 }
+                #[warn(clippy::collapsible_else_if)]
                 if *highlight {
                     out_line = String::from_utf8(
                         regex
@@ -471,14 +499,18 @@ fn process_line(line: &String, context: &mut Context) {
                         != LineSelection::ExplicitlyForbidden
                         && !end.is_empty()
                     {
-                        if &in_line[0..end.len()] == end {
-                            // We want to print the last matched line if it still matches exactly
-                            // with the time, so we start forbidding on next line.
-                            context.multiline_selection_state.forbid_next_line = true;
-                        } else if &in_line[0..end.len()] > end {
-                            // But if it has a later time, we already forbid this line.
-                            context.multiline_selection_state.multiline_selection =
-                                LineSelection::ExplicitlyForbidden;
+                        match (in_line[0..end.len()]).cmp(end) {
+                            Ordering::Equal => {
+                                // We want to print the last matched line if it still matches exactly
+                                // with the time, so we start forbidding on next line.
+                                context.multiline_selection_state.forbid_next_line = true;
+                            }
+                            Ordering::Greater => {
+                                // But if it has a later time, we already forbid this line.
+                                context.multiline_selection_state.multiline_selection =
+                                    LineSelection::ExplicitlyForbidden;
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -498,8 +530,13 @@ fn process_line(line: &String, context: &mut Context) {
                         context.highlight_threads_state.ids.insert(
                             thread_id.to_string(),
                             HighlightThreadsIdData {
-                                style: context.highlight_threads_state.styles.next().reverse(),
-                                regex: RegexBuilder::new(&thread_id)
+                                style: context
+                                    .highlight_threads_state
+                                    .styles
+                                    .next()
+                                    .unwrap()
+                                    .reverse(),
+                                regex: RegexBuilder::new(thread_id)
                                     .case_insensitive(true)
                                     .build()
                                     .unwrap(),
@@ -566,14 +603,18 @@ fn main() {
         }
     };
 
+    let mut exit = false;
     for option in &context.options {
         match option {
-            Option::Help => {
+            CommandLineOption::Help => {
                 let binary_name = std::env::args().next().unwrap();
                 eprintln!(HELP_TEXT!(), binary_name = binary_name);
-                std::process::exit(0);
+                exit = true;
             }
         }
+    }
+    if exit {
+        std::process::exit(0);
     }
 
     let stdin = std::io::stdin();
