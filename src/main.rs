@@ -1,7 +1,6 @@
 use ansi_term::{Colour, Style};
 use regex::bytes::Regex;
 use regex::bytes::RegexBuilder;
-use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 
@@ -217,8 +216,8 @@ pub enum Command {
     // values. If begin or end and empty strings, they are ignored.
     FilterTime(
         /* time_regex */ Regex,
-        /* begin */ String,
-        /* end */ String,
+        /* begin */ u64,
+        /* end */ u64,
     ),
     // Assuming a GStreamer log format, locates the different thread ids and assigns a different
     // style to each of them.
@@ -251,7 +250,9 @@ impl Context {
         let mut styles = StyleIterator::new(false, true, true);
         let mut commands: VecDeque<Command> = VecDeque::new();
         let mut multiline_selection = LineSelection::Neutral;
-        let time_regex = RegexBuilder::new(r"^[0-9][0-9:.]*")
+
+        // Matches H:M:S.S and also M:S.S and S.S (with or without the decimal part).
+        let time_regex = RegexBuilder::new(r"^(((?<h>[0-9]+):)?((?<m>[0-9]+):))?(?<s>[0-9]+[.]?[0-9]*)")
             .case_insensitive(true)
             .build();
 
@@ -327,8 +328,8 @@ impl Context {
                 }
                 commands.push_back(Command::FilterTime(
                     time_regex.clone().unwrap(),
-                    tokens[0].to_string(),
-                    tokens[1].to_string(),
+                    timestring_to_timestamp(&time_regex.clone().unwrap(), tokens[0].as_bytes()),
+                    timestring_to_timestamp(&time_regex.clone().unwrap(), tokens[1].as_bytes()),
                 ));
             } else if arg.starts_with(OPTION_HIGHLIGHT_THREADS) {
                 commands.push_back(Command::HighlightThreads);
@@ -371,6 +372,29 @@ impl Context {
             },
             highlight_threads_state: HighlightThreadsState::new(),
         }
+    }
+}
+
+fn timestring_to_timestamp(time_regex:&Regex, time_string:&[u8]) -> u64 {
+    if let Some(captures) = time_regex.captures(time_string) {
+        let mut hour:u32 = 0;
+        if let Some(h) = captures.name("h") {
+            hour = std::str::from_utf8(h.as_bytes()).unwrap_or("0").parse::<u32>()
+                .unwrap_or(0);
+        }
+        let mut minute: u8 = 0;
+        if let Some(m) = captures.name("m") {
+            minute = std::str::from_utf8(m.as_bytes()).unwrap_or("0").parse::<u8>()
+                .unwrap_or(0);
+        }
+        let mut second: u64 = 0;
+        if let Some(s) = captures.name("s") {
+            second = (std::str::from_utf8(s.as_bytes()).unwrap_or("0").parse::<f64>()
+                .unwrap_or(0.0) * 1000000000.0).trunc() as u64;
+        }
+        second + 1000000000 * 60 * (minute as u64 + 60 * hour as u64)
+    } else {
+        0
     }
 }
 
@@ -485,35 +509,39 @@ fn process_line(line: &str, context: &mut Context) {
                     context.multiline_selection_state.multiline_selection =
                         LineSelection::ExplicitlyForbidden;
                 } else {
-                    if !time_regex.is_match(in_line.to_string().as_bytes()) {
+                    let in_line_as_bytes = in_line.as_bytes();
+                    if !time_regex.is_match(in_line_as_bytes) {
                         continue;
                     }
+
+                    let timestamp = timestring_to_timestamp(time_regex, in_line_as_bytes);
+
                     if context.multiline_selection_state.multiline_selection
                         != LineSelection::ExplicitlyAllowed
-                        && !begin.is_empty()
-                        && &in_line >= begin
-                        && (end.is_empty() || !end.is_empty() && &in_line[0..end.len()] <= end)
+                        && *begin > 0
+                        && timestamp >= *begin
+                        && (*end == 0 || *end > 0 && timestamp <= *end)
                     {
                         context.multiline_selection_state.multiline_selection =
                             LineSelection::ExplicitlyAllowed;
                     }
                     if context.multiline_selection_state.multiline_selection
                         != LineSelection::ExplicitlyForbidden
-                        && !end.is_empty()
+                        && *end > 0
                     {
-                        match (in_line[0..end.len()]).cmp(end) {
-                            Ordering::Equal => {
+                        match timestamp.cmp(end) {
+                            std::cmp::Ordering::Equal => {
                                 // We want to print the last matched line if it still matches exactly
                                 // with the time, so we start forbidding on next line.
                                 context.multiline_selection_state.forbid_next_line = true;
-                            }
-                            Ordering::Greater => {
+                            },
+                            std::cmp::Ordering::Greater => {
                                 // But if it has a later time, we already forbid this line.
                                 context.multiline_selection_state.multiline_selection =
                                     LineSelection::ExplicitlyForbidden;
-                            }
+                            },
                             _ => {}
-                        }
+                        };
                     }
                 }
             }
