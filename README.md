@@ -29,3 +29,11 @@ These are the available commands and their syntax. All the patterns are case ins
   - Syntax: `ht:` (without parameters)
 
 Note that all these commands are executed in order, so you can easily refine the behaviour by carefully choosing commands in the right order. For instance `sourcebuffer h:true h:false 'h:[0-9]:[0-9:.]*[0-9]' n:enqueue` will select only the lines containing the "sourcebuffer" word (highlighting the word). Then on those selected lines, highlight the words "true" and "false", as well as any timestamp that may appear in the line (in 3 different colors). If any of the lines contains the "enqueue" word, they will be discarded and not shown.
+
+## Future ideas
+
+Some features that might be interesting for the future are:
+
+- Parenthesis support for the expressions, or at least some stopper ("!", ";"...) for "sibling expressions" (expressions having the same priority), so that any new expression after the stopper isn't considered as "sibling", but as something that happens after the previous sibling expressions have been applied (eg: instead of `fc:a OR fc:b OR fc:c`, being able to have `(fc:a OR fc:b) AND fc:c`).
+- Loading a config file where preexisting expressions can be defined (with an alias) and then the alias used in the command line, sort of as a library of expressions (eg: for transforming WebKit `{458333/1000000 = 0.458333}` timestamps into something more manageable such as `0.458333`).
+- More flexible syntax for thread highlighting and time filtering, not always tied to the third and first line tokens, respectively.
