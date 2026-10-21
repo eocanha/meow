@@ -221,7 +221,9 @@ pub enum Command {
     ),
     // Assuming a GStreamer log format, locates the different thread ids and assigns a different
     // style to each of them.
-    HighlightThreads,
+    HighlightThreads(
+        /* thread_id_regex */ Regex,
+    ),
 }
 
 #[derive(Debug)]
@@ -253,6 +255,11 @@ impl Context {
 
         // Matches H:M:S.S and also M:S.S and S.S (with or without the decimal part).
         let time_regex = RegexBuilder::new(r"^(((?<h>[0-9]+):)?((?<m>[0-9]+):))?(?<s>[0-9]+[.]?[0-9]*)")
+            .case_insensitive(true)
+            .build();
+
+        // Matches integers and hexadecimal integers.
+        let thread_id_regex = RegexBuilder::new(r"[0-9]([x][0-9])?[0-9]*")
             .case_insensitive(true)
             .build();
 
@@ -332,7 +339,9 @@ impl Context {
                     timestring_to_timestamp(&time_regex.clone().unwrap(), tokens[1].as_bytes()),
                 ));
             } else if arg.starts_with(OPTION_HIGHLIGHT_THREADS) {
-                commands.push_back(Command::HighlightThreads);
+                commands.push_back(Command::HighlightThreads(
+                    thread_id_regex.clone().unwrap(),
+                ));
             } else {
                 // Filters can be specified with "fc:" (that's why we remove the header) or just with "" (that's why we're in an else)
                 if arg.starts_with(OPTION_FILTER) {
@@ -545,7 +554,7 @@ fn process_line(line: &str, context: &mut Context) {
                     }
                 }
             }
-            Command::HighlightThreads => {
+            Command::HighlightThreads(thread_id_regex) => {
                 if context.multiline_selection_state.multiline_selection
                     == LineSelection::ExplicitlyForbidden
                 {
@@ -553,7 +562,11 @@ fn process_line(line: &str, context: &mut Context) {
                 }
                 // Thread id is the 3rd field (using tab as separator) in GStreamer logs.
                 if let Some(thread_id) = in_line.split_whitespace().nth(2) {
-                    if !thread_id.starts_with("0x") {
+                    if thread_id.is_empty() {
+                        continue;
+                    }
+                    let thread_id_as_bytes = thread_id.as_bytes();
+                    if !thread_id_regex.is_match(thread_id_as_bytes) {
                         continue;
                     }
                     if !context.highlight_threads_state.ids.contains_key(thread_id) {
